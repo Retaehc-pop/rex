@@ -23,11 +23,10 @@ a1b2c3d fix typo in config
 ```bash
 git clone https://github.com/you/rex
 cd rex
-go build -o ~/.local/bin/rex     ./cmd/rex
-go build -o ~/.local/bin/rexd    ./cmd/rexd
+make install          # installs to ~/.local/bin  (or $PREFIX/bin)
 ```
 
-Both binaries must live in the same directory. `rex` auto-starts `rexd` on first use.
+Both binaries (`rex` and `rexd`) must live in the same directory. `rex` auto-starts `rexd` on first use.
 
 ---
 
@@ -94,6 +93,104 @@ The active session is remembered in the config file. All plain `rex <command>` i
 
 ---
 
+## Jump hosts (bastion / login nodes)
+
+Many environments — HPC clusters, corporate networks, air-gapped servers — require
+you to SSH into an intermediate machine before reaching the one you actually want:
+
+```
+your laptop  ──SSH──►  login.cluster.com  ──SSH──►  gpu-node-04.internal
+              (public)                     (internal network only)
+```
+
+Rex handles this automatically with a `jump` host.
+
+### Setting up a jump session
+
+Pass the jump host between the session name and the target:
+
+```bash
+rex --set-session cluster alice@login.cluster.com alice@gpu-node-04
+#                  name    jump host              target
+```
+
+If you prefer to omit the name (it defaults to the target hostname):
+
+```bash
+rex --set-session alice@login.cluster.com alice@gpu-node-04
+```
+
+You can also use different usernames and ports on each hop:
+
+```bash
+rex --set-session cluster bob@login.cluster.com:2222 alice@gpu-node-04
+```
+
+### First connection
+
+Because rex connects to two hosts, it may prompt twice — once for the jump host
+and once for the target:
+
+```
+$ rex --set-session cluster alice@login.cluster.com alice@gpu-node-04
+Session "cluster" registered and activated (alice@gpu-node-04 via alice@login.cluster.com)
+
+$ rex hostname
+The authenticity of host "login.cluster.com:22" can't be established.
+ED25519 key fingerprint is SHA256:abc123...
+Are you sure you want to continue connecting (yes/no)? yes
+
+The authenticity of host "gpu-node-04.internal:22" can't be established.
+ED25519 key fingerprint is SHA256:xyz789...
+Are you sure you want to continue connecting (yes/no)? yes
+
+gpu-node-04
+```
+
+Both hosts are added to `~/.ssh/known_hosts`. Subsequent commands connect silently.
+
+### Using the session
+
+Once registered, using a jump session looks exactly like any other:
+
+```bash
+rex hostname                          # runs on gpu-node-04
+rex nvidia-smi                        # check GPU status
+rex --shell                           # interactive shell on gpu-node-04
+rex --upload model.py ~/project/      # upload a file through the jump
+rex --download ~/results/ ./results/  # download results back
+rex --session cluster sbatch job.sh   # run without switching active session
+```
+
+### The daemon advantage
+
+With `rexd` running, the two SSH connections are established once and kept alive.
+Every subsequent `rex` command reuses them — no repeated two-hop handshakes.
+The first command takes a little longer (two handshakes); all others are instant.
+
+### Config file representation
+
+After running `--set-session`, the config looks like this:
+
+```toml
+[sessions.cluster]
+host = "gpu-node-04.internal"
+user = "alice"
+jump = "alice@login.cluster.com"
+```
+
+You can also write or edit this directly. The `jump` field is omitted entirely
+for sessions that connect directly, keeping the config clean:
+
+```toml
+[sessions.work]           [sessions.cluster]
+host = "myserver.com"     host = "gpu-node-04.internal"
+user = "alice"            user = "alice"
+port = 22                 jump = "alice@login.cluster.com"
+```
+
+---
+
 ## File transfer
 
 ### Upload
@@ -153,7 +250,7 @@ rex --json uptime
 Combine with `jq`:
 
 ```bash
-duration=$(rex --json -- sleep 1 | jq .duration_s)
+duration=$(rex --json uptime | jq .duration_s)
 ```
 
 ### Piping
@@ -179,7 +276,8 @@ done
 
 Rex uses key-based authentication only — no passwords are stored.
 
-**Automatic** (recommended): if `SSH_AUTH_SOCK` is set, rex uses your running ssh-agent. This works out of the box on most desktop Linux and macOS setups.
+**Automatic** (recommended): if `SSH_AUTH_SOCK` is set, rex uses your running
+ssh-agent. This works out of the box on most desktop Linux and macOS setups.
 
 **Explicit key**: set the `identity` field in the config:
 
@@ -191,7 +289,9 @@ port     = 22
 identity = "~/.ssh/id_ed25519"
 ```
 
-**First connection**: rex shows the remote host's fingerprint and asks you to confirm before adding it to `~/.ssh/known_hosts`. Subsequent connections are verified silently. Rex never silently accepts an unknown or changed host key.
+**First connection**: rex shows the remote host's fingerprint and asks you to
+confirm before adding it to `~/.ssh/known_hosts`. Subsequent connections are
+verified silently. Rex never silently accepts an unknown or changed host key.
 
 ---
 
@@ -207,13 +307,16 @@ you          rex              rexd                  SSH server
  │◄─ output ──┤                │                        │
 ```
 
-`rex` is the command you type. `rexd` is a background daemon that keeps SSH connections alive. The first `rex` command on a new machine starts `rexd` automatically.
+`rex` is the command you type. `rexd` is a background daemon that keeps SSH
+connections alive. The first `rex` command starts `rexd` automatically.
 
-Instead of opening a new SSH connection for every command (a ~200ms handshake each time), `rex` sends requests to `rexd` over a local Unix socket. `rexd` multiplexes commands over the existing connection, then streams stdout, stderr, and the exit code back.
+Instead of opening a new SSH connection for every command (a ~200ms handshake
+each time), `rex` sends requests to `rexd` over a local Unix socket. `rexd`
+multiplexes commands over the existing connection, then streams stdout, stderr,
+and the exit code back.
 
-The daemon shuts itself down after 30 minutes of inactivity.
-
-If `rexd` is unavailable for any reason, `rex` falls back to a direct SSH connection transparently.
+The daemon shuts itself down after 30 minutes of inactivity. If `rexd` is
+unavailable, `rex` falls back to a direct SSH connection transparently.
 
 ### Socket location
 
@@ -223,37 +326,6 @@ If `rexd` is unavailable for any reason, `rex` falls back to a direct SSH connec
 | No | `/tmp/rex-$UID/rexd.sock` |
 
 Override the config file location with `REX_CONFIG=/path/to/config.toml`.
-
----
-
-## Jump hosts (bastion / login nodes)
-
-If you can only reach your work machine by SSHing into a login node first, add
-`jump_host` to the session config:
-
-```toml
-[sessions.cluster]
-host = "gpu-node-04.internal"           # the machine you actually want
-user = "alice"
-jump = "alice@login.cluster.example.com"  # the node you can reach directly
-```
-
-Or via `--set-session`:
-
-```bash
-rex --set-session cluster alice@login.cluster.example.com alice@gpu-node-04.internal
-#                  name    jump                           target
-```
-
-rex opens one SSH connection to the jump host, tunnels a TCP channel through it
-to the target, and negotiates a second SSH session over that channel — the same
-thing `ssh -J login.cluster.example.com gpu-node-04.internal` does.
-
-The jump host and target host are verified against `~/.ssh/known_hosts`
-independently. On first connection rex prompts once for each unknown host.
-
-With the daemon running, the two connections are kept open and reused across
-commands, so the two-hop overhead only happens once.
 
 ---
 
@@ -274,7 +346,7 @@ identity = "~/.ssh/id_ed25519"   # optional; uses ssh-agent if omitted
 [sessions.cluster]
 host = "gpu-node-04.internal"
 user = "alice"
-jump = "alice@login.cluster.example.com"
+jump = "alice@login.cluster.com"   # omit entirely for direct connections
 
 [sessions.homelab]
 host = "192.168.1.10"
@@ -289,22 +361,26 @@ The file is written with mode `600`. Do not add passwords — they are not suppo
 ## Reference
 
 ```
-rex --set-session [name] user@host[:port]   register and activate a session
-rex --sessions                              list all sessions
-rex --use <name>                            switch active session
-rex <command>                               run command on active session
-rex --session <name> <command>              run command on a named session
-rex --shell                                 open interactive shell
-rex --upload [-r] <local> <remote>          upload file or directory
-rex --download [-r] <remote> <local>        download file or directory
-rex --copy <session1:/path> <session2:/path> copy file between sessions
-rex --json                                  emit machine-readable JSON result
-rex --force                                 skip overwrite confirmation
-rex --preserve                              keep timestamps and permissions
+rex --set-session [name] user@host[:port]            register a direct session
+rex --set-session [name] user@jump user@host[:port]  register a jump session
+rex --sessions                                        list all sessions
+rex --use <name>                                      switch active session
+rex <command>                                         run command on active session
+rex --session <name> <command>                        run command on a named session
+rex --shell                                           open interactive shell
+rex --upload [-r] <local> <remote>                    upload file or directory
+rex --download [-r] <remote> <local>                  download file or directory
+rex --copy <session1:/path> <session2:/path>          copy file between sessions
+rex --json                                            emit machine-readable JSON result
+rex --force                                           skip overwrite confirmation
+rex --preserve                                        keep timestamps and permissions
 ```
 
-When a remote command itself has flags (e.g. `git log --oneline`), place rex's own flags before the command name — rex stops parsing its own flags at the first non-flag word:
+When a remote command itself has flags (e.g. `git log --oneline`), place rex's
+own flags before the command name — rex stops parsing its own flags at the first
+non-flag word:
 
 ```bash
 rex --session prod git log --oneline -10    # works fine
+rex --session cluster nvidia-smi -l 1      # works fine
 ```
