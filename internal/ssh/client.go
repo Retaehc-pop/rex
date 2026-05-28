@@ -36,7 +36,7 @@ func ConnectNoPrompt(cfg config.SessionConfig) (*Client, error) {
 }
 
 func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
-	if cfg.JumpHost == "" {
+	if cfg.Jump == "" {
 		conn, err := dialDirect(cfg.Host, cfg.User, cfg.Port, cfg.Identity, noPrompt)
 		if err != nil {
 			return nil, err
@@ -45,18 +45,14 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 	}
 
 	// Two-hop: local → jump host → target
-	jumpPort := cfg.JumpPort
-	if jumpPort == 0 {
-		jumpPort = 22
-	}
-	jumpUser := cfg.JumpUser
-	if jumpUser == "" {
-		jumpUser = cfg.User
+	jumpUser, jumpHost, jumpPort, err := parseJump(cfg.Jump, cfg.User)
+	if err != nil {
+		return nil, err
 	}
 
-	jumpConn, err := dialDirect(cfg.JumpHost, jumpUser, jumpPort, cfg.Identity, noPrompt)
+	jumpConn, err := dialDirect(jumpHost, jumpUser, jumpPort, cfg.Identity, noPrompt)
 	if err != nil {
-		return nil, fmt.Errorf("jump host %s: %w", cfg.JumpHost, err)
+		return nil, fmt.Errorf("jump host %s: %w", jumpHost, err)
 	}
 
 	// Open a forwarded TCP channel through the jump host to the target.
@@ -64,7 +60,7 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 	chanConn, err := jumpConn.Dial("tcp", targetAddr)
 	if err != nil {
 		jumpConn.Close()
-		return nil, fmt.Errorf("reach %s via %s: %w", cfg.Host, cfg.JumpHost, err)
+		return nil, fmt.Errorf("reach %s via %s: %w", cfg.Host, jumpHost, err)
 	}
 
 	auth, err := authMethods(cfg.Identity)
@@ -88,13 +84,50 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 	if err != nil {
 		chanConn.Close()
 		jumpConn.Close()
-		return nil, fmt.Errorf("SSH to %s via %s: %w", cfg.Host, cfg.JumpHost, err)
+		return nil, fmt.Errorf("SSH to %s via %s: %w", cfg.Host, jumpHost, err)
 	}
 
 	return &Client{
 		conn: ssh.NewClient(ncc, chans, reqs),
 		jump: jumpConn,
 	}, nil
+}
+
+// parseJump parses a jump string "user@host[:port]", defaulting user to
+// defaultUser and port to 22 when omitted.
+func parseJump(jump, defaultUser string) (user, host string, port int, err error) {
+	u, h, p, e := parseTarget(jump)
+	if e != nil {
+		return "", "", 0, fmt.Errorf("invalid jump %q: %w", jump, e)
+	}
+	if u == "" {
+		u = defaultUser
+	}
+	return u, h, p, nil
+}
+
+// parseTarget is the internal version of session.ParseTarget to avoid an import cycle.
+func parseTarget(target string) (user, host string, port int, err error) {
+	port = 22
+	at := strings.LastIndex(target, "@")
+	if at < 0 {
+		// No user — treat entire string as host.
+		host = target
+		return
+	}
+	user = target[:at]
+	hostport := target[at+1:]
+	if strings.Contains(hostport, ":") {
+		h, p, e := net.SplitHostPort(hostport)
+		if e != nil {
+			return "", "", 0, e
+		}
+		host = h
+		port, err = strconv.Atoi(p)
+		return
+	}
+	host = hostport
+	return
 }
 
 // dialDirect opens a direct (non-proxied) SSH connection.

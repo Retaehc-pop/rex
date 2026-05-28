@@ -64,16 +64,26 @@ func ParseTarget(target string) (user, host string, port int, err error) {
 	return
 }
 
-func Set(cfg *config.Config, name, target string) error {
+// Set registers a session. jump is optional ("" means no jump host).
+// jump format: "user@host[:port]"
+func Set(cfg *config.Config, name, target, jump string) error {
 	user, host, port, err := ParseTarget(target)
 	if err != nil {
 		return err
 	}
-	cfg.Sessions[name] = config.SessionConfig{
+	sess := config.SessionConfig{
 		Host: host,
 		User: user,
 		Port: port,
+		Jump: jump, // stored verbatim; parsed at connect time
 	}
+	if jump != "" {
+		// Validate jump target syntax up front.
+		if _, _, _, err := ParseTarget(jump); err != nil {
+			return fmt.Errorf("jump host: %w", err)
+		}
+	}
+	cfg.Sessions[name] = sess
 	cfg.Active.Session = name
 	return nil
 }

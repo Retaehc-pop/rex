@@ -233,12 +233,16 @@ If you can only reach your work machine by SSHing into a login node first, add
 
 ```toml
 [sessions.cluster]
-host      = "gpu-node-04.internal"   # the machine you actually want
-user      = "alice"
-port      = 22
-jump_host = "login.cluster.example.com"   # the node you can reach directly
-jump_user = "alice"    # defaults to user if omitted
-jump_port = 22         # defaults to 22 if omitted
+host = "gpu-node-04.internal"           # the machine you actually want
+user = "alice"
+jump = "alice@login.cluster.example.com"  # the node you can reach directly
+```
+
+Or via `--set-session`:
+
+```bash
+rex --set-session cluster alice@login.cluster.example.com alice@gpu-node-04.internal
+#                  name    jump                           target
 ```
 
 rex opens one SSH connection to the jump host, tunnels a TCP channel through it
@@ -268,10 +272,9 @@ port     = 22             # default: 22
 identity = "~/.ssh/id_ed25519"   # optional; uses ssh-agent if omitted
 
 [sessions.cluster]
-host      = "gpu-node-04.internal"
-user      = "alice"
-jump_host = "login.cluster.example.com"
-# jump_user and jump_port default to user/22
+host = "gpu-node-04.internal"
+user = "alice"
+jump = "alice@login.cluster.example.com"
 
 [sessions.homelab]
 host = "192.168.1.10"
