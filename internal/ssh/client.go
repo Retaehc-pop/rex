@@ -51,7 +51,7 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 
 	// Dial the first node directly over TCP.
 	first := cfg.Nodes[0]
-	conn, err := dialDirect(first.Host, first.User, effectivePort(first.Port), first.Identity, hkc)
+	conn, err := dialDirect(first.Host, first.User, effectivePort(first.Port), first.Identity, hkc, noPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 			return nil, fmt.Errorf("hop %d: reach %s: %w", i+2, node.Host, err)
 		}
 
-		auth, err := authMethods(node.Identity)
+		auth, err := authMethods(node.Identity, noPrompt)
 		if err != nil {
 			chanConn.Close()
 			closeChain(conn, chain)
@@ -94,8 +94,8 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 }
 
 // dialDirect opens a single direct TCP+SSH connection.
-func dialDirect(host, user string, port int, identity string, hkc ssh.HostKeyCallback) (*ssh.Client, error) {
-	auth, err := authMethods(identity)
+func dialDirect(host, user string, port int, identity string, hkc ssh.HostKeyCallback, noPrompt bool) (*ssh.Client, error) {
+	auth, err := authMethods(identity, noPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func addToKnownHosts(path, hostname string, key ssh.PublicKey) error {
 	return err
 }
 
-func authMethods(identity string) ([]ssh.AuthMethod, error) {
+func authMethods(identity string, noPrompt bool) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
@@ -195,10 +195,43 @@ func authMethods(identity string) ([]ssh.AuthMethod, error) {
 		}
 	}
 
+	// Allow the server to send password/OTP/confirmation prompts during auth.
+	// Skipped in no-prompt mode (daemon has no terminal).
+	if !noPrompt {
+		methods = append(methods, ssh.KeyboardInteractive(keyboardInteractiveChallenge))
+	}
+
 	if len(methods) == 0 {
 		return nil, fmt.Errorf("no authentication methods available (no SSH_AUTH_SOCK, no identity file)")
 	}
 	return methods, nil
+}
+
+// keyboardInteractiveChallenge handles server-side auth prompts (passwords,
+// OTPs, yes/no confirmations). Echoed questions use plain Scanln; hidden ones
+// use term.ReadPassword so the input is not shown.
+func keyboardInteractiveChallenge(name, instruction string, questions []string, echos []bool) ([]string, error) {
+	if name != "" {
+		fmt.Fprintln(os.Stderr, name)
+	}
+	if instruction != "" {
+		fmt.Fprintln(os.Stderr, instruction)
+	}
+	answers := make([]string, len(questions))
+	for i, q := range questions {
+		fmt.Fprint(os.Stderr, q)
+		if echos[i] {
+			fmt.Fscan(os.Stdin, &answers[i])
+		} else {
+			b, err := term.ReadPassword(int(os.Stdin.Fd()))
+			if err != nil {
+				return nil, err
+			}
+			answers[i] = string(b)
+			fmt.Fprintln(os.Stderr)
+		}
+	}
+	return answers, nil
 }
 
 func effectivePort(p int) int {
