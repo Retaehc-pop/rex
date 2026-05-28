@@ -23,7 +23,7 @@ type Server struct {
 	cfgPath    string
 
 	mu       sync.Mutex
-	pool     map[string]*gossh.Client
+	pool     map[string]*rexssh.Client // keyed by session name; Close() tears down jump too
 	lastUsed time.Time
 }
 
@@ -31,7 +31,7 @@ func NewServer(socketPath, cfgPath string) *Server {
 	return &Server{
 		socketPath: socketPath,
 		cfgPath:    cfgPath,
-		pool:       make(map[string]*gossh.Client),
+		pool:       make(map[string]*rexssh.Client),
 		lastUsed:   time.Now(),
 	}
 }
@@ -123,16 +123,16 @@ func (s *Server) handle(conn net.Conn) {
 	}
 }
 
-// getConn returns an existing pooled SSH connection or establishes a new one.
+// getConn returns the underlying *gossh.Client for an existing or new pooled connection.
 func (s *Server) getConn(sessionName string) (*gossh.Client, error) {
 	s.mu.Lock()
 	if c, ok := s.pool[sessionName]; ok {
-		_, _, err := c.SendRequest("keepalive@openssh.com", true, nil)
+		_, _, err := c.SSHClient().SendRequest("keepalive@openssh.com", true, nil)
 		if err == nil {
 			s.mu.Unlock()
-			return c, nil
+			return c.SSHClient(), nil
 		}
-		c.Close()
+		c.Close() // closes both target and jump connections
 		delete(s.pool, sessionName)
 	}
 	s.mu.Unlock()
@@ -146,25 +146,24 @@ func (s *Server) getConn(sessionName string) (*gossh.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Use no-prompt mode: unknown hosts return an error rather than prompting
-	// (daemon has no terminal). rex will fall back to direct SSH and prompt there.
+	// No-prompt: unknown hosts return an error. rex falls back to direct SSH
+	// for the first connection so the user can be prompted interactively.
 	client, err := rexssh.ConnectNoPrompt(sessCfg)
 	if err != nil {
 		return nil, err
 	}
-	sshClient := client.SSHClient()
 
 	s.mu.Lock()
 	if existing, ok := s.pool[sessionName]; ok {
-		// Another goroutine connected first; discard ours.
-		sshClient.Close()
-		sshClient = existing
+		// Another goroutine won the race; discard ours.
+		client.Close()
+		client = existing
 	} else {
-		s.pool[sessionName] = sshClient
+		s.pool[sessionName] = client
 	}
 	s.mu.Unlock()
 
-	return sshClient, nil
+	return client.SSHClient(), nil
 }
 
 func (s *Server) runSession(conn net.Conn, sshConn *gossh.Client, tty bool, w, h int, start func(*gossh.Session) error) {

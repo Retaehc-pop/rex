@@ -20,31 +20,111 @@ import (
 
 type Client struct {
 	conn *ssh.Client
+	jump *ssh.Client // non-nil when a jump host was used; closed alongside conn
 }
 
-// Connect opens an SSH connection, prompting the user interactively for
-// unknown hosts.
+// Connect opens an SSH connection, prompting the user interactively for unknown hosts.
 func Connect(cfg config.SessionConfig) (*Client, error) {
 	return connect(cfg, false)
 }
 
 // ConnectNoPrompt opens an SSH connection but refuses unknown hosts instead of
-// prompting. Used by rexd (which has no terminal). If the host is unknown,
-// the caller should fall back to Connect so the user can be prompted.
+// prompting. Used by rexd (which has no terminal). rex falls back to Connect
+// so the user can be prompted on first use.
 func ConnectNoPrompt(cfg config.SessionConfig) (*Client, error) {
 	return connect(cfg, true)
 }
 
 func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
+	if cfg.JumpHost == "" {
+		conn, err := dialDirect(cfg.Host, cfg.User, cfg.Port, cfg.Identity, noPrompt)
+		if err != nil {
+			return nil, err
+		}
+		return &Client{conn: conn}, nil
+	}
+
+	// Two-hop: local → jump host → target
+	jumpPort := cfg.JumpPort
+	if jumpPort == 0 {
+		jumpPort = 22
+	}
+	jumpUser := cfg.JumpUser
+	if jumpUser == "" {
+		jumpUser = cfg.User
+	}
+
+	jumpConn, err := dialDirect(cfg.JumpHost, jumpUser, jumpPort, cfg.Identity, noPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("jump host %s: %w", cfg.JumpHost, err)
+	}
+
+	// Open a forwarded TCP channel through the jump host to the target.
+	targetAddr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	chanConn, err := jumpConn.Dial("tcp", targetAddr)
+	if err != nil {
+		jumpConn.Close()
+		return nil, fmt.Errorf("reach %s via %s: %w", cfg.Host, cfg.JumpHost, err)
+	}
+
 	auth, err := authMethods(cfg.Identity)
 	if err != nil {
+		chanConn.Close()
+		jumpConn.Close()
+		return nil, err
+	}
+	hkc, err := makeHostKeyCallback(noPrompt)
+	if err != nil {
+		chanConn.Close()
+		jumpConn.Close()
 		return nil, err
 	}
 
+	ncc, chans, reqs, err := ssh.NewClientConn(chanConn, targetAddr, &ssh.ClientConfig{
+		User:            cfg.User,
+		Auth:            auth,
+		HostKeyCallback: hkc,
+	})
+	if err != nil {
+		chanConn.Close()
+		jumpConn.Close()
+		return nil, fmt.Errorf("SSH to %s via %s: %w", cfg.Host, cfg.JumpHost, err)
+	}
+
+	return &Client{
+		conn: ssh.NewClient(ncc, chans, reqs),
+		jump: jumpConn,
+	}, nil
+}
+
+// dialDirect opens a direct (non-proxied) SSH connection.
+func dialDirect(host, user string, port int, identity string, noPrompt bool) (*ssh.Client, error) {
+	auth, err := authMethods(identity)
+	if err != nil {
+		return nil, err
+	}
+	hkc, err := makeHostKeyCallback(noPrompt)
+	if err != nil {
+		return nil, err
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
+		User:            user,
+		Auth:            auth,
+		HostKeyCallback: hkc,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect to %s: %w", addr, err)
+	}
+	return conn, nil
+}
+
+// makeHostKeyCallback builds a host-key verifier backed by ~/.ssh/known_hosts.
+// When noPrompt is true, unknown hosts return an error instead of prompting.
+func makeHostKeyCallback(noPrompt bool) (ssh.HostKeyCallback, error) {
 	home, _ := os.UserHomeDir()
 	knownHostsPath := filepath.Join(home, ".ssh", "known_hosts")
 
-	// Ensure known_hosts exists so knownhosts.New doesn't fail on fresh systems.
 	if _, err := os.Stat(knownHostsPath); os.IsNotExist(err) {
 		_ = os.MkdirAll(filepath.Dir(knownHostsPath), 0700)
 		f, ferr := os.OpenFile(knownHostsPath, os.O_CREATE, 0600)
@@ -58,7 +138,7 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 		return nil, fmt.Errorf("load known_hosts: %w", err)
 	}
 
-	hostKeyCallback := func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		err := strictCallback(hostname, remote, key)
 		if err == nil {
 			return nil
@@ -74,7 +154,6 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 			return fmt.Errorf("host %q not in known_hosts; connect directly with rex first to verify the key", hostname)
 		}
 
-		// Unknown host — prompt user.
 		fingerprint := ssh.FingerprintSHA256(key)
 		fmt.Fprintf(os.Stderr, "The authenticity of host %q can't be established.\n", hostname)
 		fmt.Fprintf(os.Stderr, "%s key fingerprint is %s.\n", key.Type(), fingerprint)
@@ -87,18 +166,7 @@ func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
 		}
 
 		return addToKnownHosts(knownHostsPath, hostname, key)
-	}
-
-	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	conn, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{
-		User:            cfg.User,
-		Auth:            auth,
-		HostKeyCallback: hostKeyCallback,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("connect to %s: %w", addr, err)
-	}
-	return &Client{conn: conn}, nil
+	}, nil
 }
 
 func addToKnownHosts(path, hostname string, key ssh.PublicKey) error {
@@ -227,7 +295,11 @@ func (c *Client) SSHClient() *ssh.Client {
 }
 
 func (c *Client) Close() error {
-	return c.conn.Close()
+	err := c.conn.Close()
+	if c.jump != nil {
+		c.jump.Close()
+	}
+	return err
 }
 
 func forwardSignals(sess *ssh.Session, ch <-chan os.Signal) {

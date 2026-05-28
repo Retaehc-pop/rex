@@ -226,6 +226,33 @@ Override the config file location with `REX_CONFIG=/path/to/config.toml`.
 
 ---
 
+## Jump hosts (bastion / login nodes)
+
+If you can only reach your work machine by SSHing into a login node first, add
+`jump_host` to the session config:
+
+```toml
+[sessions.cluster]
+host      = "gpu-node-04.internal"   # the machine you actually want
+user      = "alice"
+port      = 22
+jump_host = "login.cluster.example.com"   # the node you can reach directly
+jump_user = "alice"    # defaults to user if omitted
+jump_port = 22         # defaults to 22 if omitted
+```
+
+rex opens one SSH connection to the jump host, tunnels a TCP channel through it
+to the target, and negotiates a second SSH session over that channel — the same
+thing `ssh -J login.cluster.example.com gpu-node-04.internal` does.
+
+The jump host and target host are verified against `~/.ssh/known_hosts`
+independently. On first connection rex prompts once for each unknown host.
+
+With the daemon running, the two connections are kept open and reused across
+commands, so the two-hop overhead only happens once.
+
+---
+
 ## Config file reference
 
 `~/.config/rex/config.toml` (or `$REX_CONFIG`):
@@ -239,6 +266,12 @@ host     = "myserver.com"
 user     = "alice"
 port     = 22             # default: 22
 identity = "~/.ssh/id_ed25519"   # optional; uses ssh-agent if omitted
+
+[sessions.cluster]
+host      = "gpu-node-04.internal"
+user      = "alice"
+jump_host = "login.cluster.example.com"
+# jump_user and jump_port default to user/22
 
 [sessions.homelab]
 host = "192.168.1.10"

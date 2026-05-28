@@ -19,6 +19,12 @@ type SessionConfig struct {
 	User     string `toml:"user"`
 	Port     int    `toml:"port"`
 	Identity string `toml:"identity"`
+
+	// JumpHost, if set, is the bastion/login node to tunnel through.
+	// JumpUser defaults to User; JumpPort defaults to 22.
+	JumpHost string `toml:"jump_host"`
+	JumpUser string `toml:"jump_user"`
+	JumpPort int    `toml:"jump_port"`
 }
 
 func New() *Config {
