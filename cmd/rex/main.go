@@ -155,51 +155,37 @@ func startDaemon() error {
 }
 
 func runSetSession(cfg *config.Config, cfgPath string, args []string) error {
-	var name, target, jump string
+	if len(args) == 0 {
+		return fmt.Errorf("usage: rex --set-session [name] user@host[:port] [user@hop2 ...]")
+	}
 
-	switch len(args) {
-	case 1:
-		// rex --set-session user@host
-		target = args[0]
-		_, host, _, err := session.ParseTarget(target)
+	var name string
+	var targets []string
+
+	if !strings.Contains(args[0], "@") {
+		name = args[0]
+		targets = args[1:]
+	} else {
+		targets = args
+		_, host, _, err := session.ParseTarget(targets[len(targets)-1])
 		if err != nil {
 			return err
 		}
 		name = host
-
-	case 2:
-		if strings.Contains(args[0], "@") {
-			// rex --set-session user1@jump user2@target
-			jump, target = args[0], args[1]
-			_, host, _, err := session.ParseTarget(target)
-			if err != nil {
-				return err
-			}
-			name = host
-		} else {
-			// rex --set-session name user@host
-			name, target = args[0], args[1]
-		}
-
-	case 3:
-		// rex --set-session name user1@jump user2@target
-		name, jump, target = args[0], args[1], args[2]
-
-	default:
-		return fmt.Errorf("usage: rex --set-session [name] [user@jump] user@host[:port]")
 	}
 
-	if err := session.Set(cfg, name, target, jump); err != nil {
+	if len(targets) == 0 {
+		return fmt.Errorf("usage: rex --set-session [name] user@host[:port] [user@hop2 ...]")
+	}
+
+	if err := session.Set(cfg, name, targets); err != nil {
 		return err
 	}
 	if err := session.Save(cfgPath, cfg); err != nil {
 		return err
 	}
-	if jump != "" {
-		fmt.Printf("Session %q registered and activated (%s via %s)\n", name, target, jump)
-	} else {
-		fmt.Printf("Session %q registered and activated (%s)\n", name, target)
-	}
+	s := cfg.Sessions[name]
+	fmt.Printf("Session %q registered and activated (%s)\n", name, session.ChainString(s))
 	return nil
 }
 
@@ -213,7 +199,7 @@ func runListSessions(cfg *config.Config) error {
 		if name == cfg.Active.Session {
 			active = " (active)"
 		}
-		fmt.Printf("  %s: %s@%s:%d%s\n", name, s.User, s.Host, s.Port, active)
+		fmt.Printf("  %s: %s%s\n", name, session.ChainString(s), active)
 	}
 	return nil
 }

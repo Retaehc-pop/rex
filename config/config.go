@@ -14,15 +14,20 @@ type ActiveConfig struct {
 	Session string `toml:"session"`
 }
 
+// SessionConfig is an ordered list of nodes forming the connection chain.
+// The first node is dialled directly; each subsequent node is reached by
+// tunnelling through the previous one. The last node is the target.
 type SessionConfig struct {
+	Name  string       `toml:"name,omitempty"`
+	Nodes []NodeConfig `toml:"nodes"`
+}
+
+type NodeConfig struct {
+	Name     string `toml:"name,omitempty"`     // optional human label
 	Host     string `toml:"host"`
 	User     string `toml:"user"`
-	Port     int    `toml:"port"`
-	Identity string `toml:"identity,omitempty"`
-
-	// Jump, if set, is the bastion/login node to tunnel through.
-	// Format: "user@host[:port]" — same syntax as the target.
-	Jump string `toml:"jump,omitempty"`
+	Port     int    `toml:"port,omitempty"`     // default 22
+	Identity string `toml:"identity,omitempty"` // path to private key; falls back to ssh-agent
 }
 
 func New() *Config {

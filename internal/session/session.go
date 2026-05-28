@@ -64,26 +64,26 @@ func ParseTarget(target string) (user, host string, port int, err error) {
 	return
 }
 
-// Set registers a session. jump is optional ("" means no jump host).
-// jump format: "user@host[:port]"
-func Set(cfg *config.Config, name, target, jump string) error {
-	user, host, port, err := ParseTarget(target)
-	if err != nil {
-		return err
+// Set registers a session from an ordered slice of "user@host[:port]" strings.
+// The first entry is dialled directly; subsequent entries are reached via the
+// previous hop. The last entry is the target.
+func Set(cfg *config.Config, name string, targets []string) error {
+	if len(targets) == 0 {
+		return fmt.Errorf("at least one target node is required")
 	}
-	sess := config.SessionConfig{
-		Host: host,
-		User: user,
-		Port: port,
-		Jump: jump, // stored verbatim; parsed at connect time
-	}
-	if jump != "" {
-		// Validate jump target syntax up front.
-		if _, _, _, err := ParseTarget(jump); err != nil {
-			return fmt.Errorf("jump host: %w", err)
+	nodes := make([]config.NodeConfig, 0, len(targets))
+	for i, t := range targets {
+		user, host, port, err := ParseTarget(t)
+		if err != nil {
+			return fmt.Errorf("node %d: %w", i+1, err)
 		}
+		nodes = append(nodes, config.NodeConfig{
+			Host: host,
+			User: user,
+			Port: port,
+		})
 	}
-	cfg.Sessions[name] = sess
+	cfg.Sessions[name] = config.SessionConfig{Name: name, Nodes: nodes}
 	cfg.Active.Session = name
 	return nil
 }
@@ -114,4 +114,18 @@ func Get(cfg *config.Config, name string) (config.SessionConfig, error) {
 		return config.SessionConfig{}, fmt.Errorf("session %q not found", name)
 	}
 	return s, nil
+}
+
+// ChainString returns a human-readable representation of the connection chain,
+// e.g. "alice@hop1:22 → bob@target:22".
+func ChainString(s config.SessionConfig) string {
+	parts := make([]string, 0, len(s.Nodes))
+	for _, n := range s.Nodes {
+		port := n.Port
+		if port == 0 {
+			port = 22
+		}
+		parts = append(parts, fmt.Sprintf("%s@%s:%d", n.User, n.Host, port))
+	}
+	return strings.Join(parts, " → ")
 }

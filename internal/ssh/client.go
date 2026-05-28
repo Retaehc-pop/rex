@@ -18,125 +18,84 @@ import (
 	"rex/config"
 )
 
+// Client wraps the final SSH connection plus any intermediate hop connections
+// that must be kept alive. chain[0] is the first hop, chain[N-1] is the
+// second-to-last hop; conn is the target.
 type Client struct {
-	conn *ssh.Client
-	jump *ssh.Client // non-nil when a jump host was used; closed alongside conn
+	conn  *ssh.Client
+	chain []*ssh.Client
 }
 
-// Connect opens an SSH connection, prompting the user interactively for unknown hosts.
+// Connect opens the SSH connection chain, prompting the user interactively for
+// unknown hosts.
 func Connect(cfg config.SessionConfig) (*Client, error) {
 	return connect(cfg, false)
 }
 
-// ConnectNoPrompt opens an SSH connection but refuses unknown hosts instead of
-// prompting. Used by rexd (which has no terminal). rex falls back to Connect
-// so the user can be prompted on first use.
+// ConnectNoPrompt opens the SSH connection chain but refuses unknown hosts
+// instead of prompting. Used by rexd (which has no terminal). rex falls back
+// to Connect so the user can be prompted on first use.
 func ConnectNoPrompt(cfg config.SessionConfig) (*Client, error) {
 	return connect(cfg, true)
 }
 
 func connect(cfg config.SessionConfig, noPrompt bool) (*Client, error) {
-	if cfg.Jump == "" {
-		conn, err := dialDirect(cfg.Host, cfg.User, cfg.Port, cfg.Identity, noPrompt)
+	if len(cfg.Nodes) == 0 {
+		return nil, fmt.Errorf("session has no nodes configured")
+	}
+
+	hkc, err := makeHostKeyCallback(noPrompt)
+	if err != nil {
+		return nil, err
+	}
+
+	// Dial the first node directly over TCP.
+	first := cfg.Nodes[0]
+	conn, err := dialDirect(first.Host, first.User, effectivePort(first.Port), first.Identity, hkc)
+	if err != nil {
+		return nil, err
+	}
+
+	// For each subsequent node, tunnel through the previous connection.
+	chain := make([]*ssh.Client, 0, len(cfg.Nodes)-1)
+	for i, node := range cfg.Nodes[1:] {
+		port := effectivePort(node.Port)
+		targetAddr := net.JoinHostPort(node.Host, strconv.Itoa(port))
+
+		chanConn, err := conn.Dial("tcp", targetAddr)
 		if err != nil {
-			return nil, err
+			closeChain(conn, chain)
+			return nil, fmt.Errorf("hop %d: reach %s: %w", i+2, node.Host, err)
 		}
-		return &Client{conn: conn}, nil
-	}
 
-	// Two-hop: local → jump host → target
-	jumpUser, jumpHost, jumpPort, err := parseJump(cfg.Jump, cfg.User)
-	if err != nil {
-		return nil, err
-	}
-
-	jumpConn, err := dialDirect(jumpHost, jumpUser, jumpPort, cfg.Identity, noPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("jump host %s: %w", jumpHost, err)
-	}
-
-	// Open a forwarded TCP channel through the jump host to the target.
-	targetAddr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	chanConn, err := jumpConn.Dial("tcp", targetAddr)
-	if err != nil {
-		jumpConn.Close()
-		return nil, fmt.Errorf("reach %s via %s: %w", cfg.Host, jumpHost, err)
-	}
-
-	auth, err := authMethods(cfg.Identity)
-	if err != nil {
-		chanConn.Close()
-		jumpConn.Close()
-		return nil, err
-	}
-	hkc, err := makeHostKeyCallback(noPrompt)
-	if err != nil {
-		chanConn.Close()
-		jumpConn.Close()
-		return nil, err
-	}
-
-	ncc, chans, reqs, err := ssh.NewClientConn(chanConn, targetAddr, &ssh.ClientConfig{
-		User:            cfg.User,
-		Auth:            auth,
-		HostKeyCallback: hkc,
-	})
-	if err != nil {
-		chanConn.Close()
-		jumpConn.Close()
-		return nil, fmt.Errorf("SSH to %s via %s: %w", cfg.Host, jumpHost, err)
-	}
-
-	return &Client{
-		conn: ssh.NewClient(ncc, chans, reqs),
-		jump: jumpConn,
-	}, nil
-}
-
-// parseJump parses a jump string "user@host[:port]", defaulting user to
-// defaultUser and port to 22 when omitted.
-func parseJump(jump, defaultUser string) (user, host string, port int, err error) {
-	u, h, p, e := parseTarget(jump)
-	if e != nil {
-		return "", "", 0, fmt.Errorf("invalid jump %q: %w", jump, e)
-	}
-	if u == "" {
-		u = defaultUser
-	}
-	return u, h, p, nil
-}
-
-// parseTarget is the internal version of session.ParseTarget to avoid an import cycle.
-func parseTarget(target string) (user, host string, port int, err error) {
-	port = 22
-	at := strings.LastIndex(target, "@")
-	if at < 0 {
-		// No user — treat entire string as host.
-		host = target
-		return
-	}
-	user = target[:at]
-	hostport := target[at+1:]
-	if strings.Contains(hostport, ":") {
-		h, p, e := net.SplitHostPort(hostport)
-		if e != nil {
-			return "", "", 0, e
+		auth, err := authMethods(node.Identity)
+		if err != nil {
+			chanConn.Close()
+			closeChain(conn, chain)
+			return nil, fmt.Errorf("hop %d auth: %w", i+2, err)
 		}
-		host = h
-		port, err = strconv.Atoi(p)
-		return
+
+		ncc, chans, reqs, err := ssh.NewClientConn(chanConn, targetAddr, &ssh.ClientConfig{
+			User:            node.User,
+			Auth:            auth,
+			HostKeyCallback: hkc,
+		})
+		if err != nil {
+			chanConn.Close()
+			closeChain(conn, chain)
+			return nil, fmt.Errorf("SSH to %s: %w", node.Host, err)
+		}
+
+		chain = append(chain, conn)
+		conn = ssh.NewClient(ncc, chans, reqs)
 	}
-	host = hostport
-	return
+
+	return &Client{conn: conn, chain: chain}, nil
 }
 
-// dialDirect opens a direct (non-proxied) SSH connection.
-func dialDirect(host, user string, port int, identity string, noPrompt bool) (*ssh.Client, error) {
+// dialDirect opens a single direct TCP+SSH connection.
+func dialDirect(host, user string, port int, identity string, hkc ssh.HostKeyCallback) (*ssh.Client, error) {
 	auth, err := authMethods(identity)
-	if err != nil {
-		return nil, err
-	}
-	hkc, err := makeHostKeyCallback(noPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +138,7 @@ func makeHostKeyCallback(noPrompt bool) (ssh.HostKeyCallback, error) {
 
 		var keyErr *knownhosts.KeyError
 		if !errors.As(err, &keyErr) || len(keyErr.Want) > 0 {
-			// Key mismatch — possible MITM, always reject.
-			return err
+			return err // key mismatch — possible MITM, always reject
 		}
 
 		if noPrompt {
@@ -241,6 +199,21 @@ func authMethods(identity string) ([]ssh.AuthMethod, error) {
 		return nil, fmt.Errorf("no authentication methods available (no SSH_AUTH_SOCK, no identity file)")
 	}
 	return methods, nil
+}
+
+func effectivePort(p int) int {
+	if p == 0 {
+		return 22
+	}
+	return p
+}
+
+// closeChain closes last and then each connection in chain in reverse order.
+func closeChain(last *ssh.Client, chain []*ssh.Client) {
+	last.Close()
+	for i := len(chain) - 1; i >= 0; i-- {
+		chain[i].Close()
+	}
 }
 
 // Run executes cmd on the remote. Allocates a PTY when stdin is a terminal.
@@ -322,15 +295,18 @@ func (c *Client) Shell() (int, error) {
 	return 0, nil
 }
 
-// SSHClient exposes the underlying connection for SFTP use.
+// SSHClient exposes the underlying target connection for SFTP use.
 func (c *Client) SSHClient() *ssh.Client {
 	return c.conn
 }
 
+// Close closes the target connection and all intermediate hop connections in
+// reverse order so each tunnel stays open until the connection through it
+// is done.
 func (c *Client) Close() error {
 	err := c.conn.Close()
-	if c.jump != nil {
-		c.jump.Close()
+	for i := len(c.chain) - 1; i >= 0; i-- {
+		c.chain[i].Close()
 	}
 	return err
 }

@@ -4,7 +4,7 @@ Run commands and transfer files on remote servers over SSH. Named sessions mean 
 
 ```
 $ rex --set-session work alice@myserver.com
-Session "work" registered and activated (alice@myserver.com)
+Session "work" registered and activated (alice@myserver.com:22)
 
 $ rex whoami
 alice
@@ -96,44 +96,41 @@ The active session is remembered in the config file. All plain `rex <command>` i
 ## Jump hosts (bastion / login nodes)
 
 Many environments — HPC clusters, corporate networks, air-gapped servers — require
-you to SSH into an intermediate machine before reaching the one you actually want:
+you to SSH into one or more intermediate machines before reaching the target:
 
 ```
 your laptop  ──SSH──►  login.cluster.com  ──SSH──►  gpu-node-04.internal
               (public)                     (internal network only)
 ```
 
-Rex handles this automatically with a `jump` host.
+Rex handles this automatically. Every session is an **ordered chain of nodes**. The first
+node is dialled directly; each subsequent node is reached by tunnelling through the previous one.
 
 ### Setting up a jump session
 
-Pass the jump host between the session name and the target:
+Pass each hop in order, outermost first:
 
 ```bash
+# One jump host
 rex --set-session cluster alice@login.cluster.com alice@gpu-node-04
-#                  name    jump host              target
-```
 
-If you prefer to omit the name (it defaults to the target hostname):
-
-```bash
+# Name is optional — defaults to the last node's hostname
 rex --set-session alice@login.cluster.com alice@gpu-node-04
-```
 
-You can also use different usernames and ports on each hop:
-
-```bash
+# Different users and ports on each hop
 rex --set-session cluster bob@login.cluster.com:2222 alice@gpu-node-04
+
+# Two jump hosts (three-hop chain)
+rex --set-session deep alice@gateway.com bob@internal-hop alice@final-target
 ```
 
 ### First connection
 
-Because rex connects to two hosts, it may prompt twice — once for the jump host
-and once for the target:
+Because rex connects to each host in turn, it may prompt once per new host:
 
 ```
 $ rex --set-session cluster alice@login.cluster.com alice@gpu-node-04
-Session "cluster" registered and activated (alice@gpu-node-04 via alice@login.cluster.com)
+Session "cluster" registered and activated (alice@login.cluster.com:22 → alice@gpu-node-04:22)
 
 $ rex hostname
 The authenticity of host "login.cluster.com:22" can't be established.
@@ -147,11 +144,11 @@ Are you sure you want to continue connecting (yes/no)? yes
 gpu-node-04
 ```
 
-Both hosts are added to `~/.ssh/known_hosts`. Subsequent commands connect silently.
+All hosts are added to `~/.ssh/known_hosts`. Subsequent commands connect silently.
 
 ### Using the session
 
-Once registered, using a jump session looks exactly like any other:
+Once registered, a jump session works exactly like any other:
 
 ```bash
 rex hostname                          # runs on gpu-node-04
@@ -164,30 +161,9 @@ rex --session cluster sbatch job.sh   # run without switching active session
 
 ### The daemon advantage
 
-With `rexd` running, the two SSH connections are established once and kept alive.
-Every subsequent `rex` command reuses them — no repeated two-hop handshakes.
-The first command takes a little longer (two handshakes); all others are instant.
-
-### Config file representation
-
-After running `--set-session`, the config looks like this:
-
-```toml
-[sessions.cluster]
-host = "gpu-node-04.internal"
-user = "alice"
-jump = "alice@login.cluster.com"
-```
-
-You can also write or edit this directly. The `jump` field is omitted entirely
-for sessions that connect directly, keeping the config clean:
-
-```toml
-[sessions.work]           [sessions.cluster]
-host = "myserver.com"     host = "gpu-node-04.internal"
-user = "alice"            user = "alice"
-port = 22                 jump = "alice@login.cluster.com"
-```
+With `rexd` running, all SSH connections are established once and kept alive.
+Every subsequent `rex` command reuses them — no repeated multi-hop handshakes.
+The first command takes a little longer; all others are instant.
 
 ---
 
@@ -279,17 +255,21 @@ Rex uses key-based authentication only — no passwords are stored.
 **Automatic** (recommended): if `SSH_AUTH_SOCK` is set, rex uses your running
 ssh-agent. This works out of the box on most desktop Linux and macOS setups.
 
-**Explicit key**: set the `identity` field in the config:
+**Explicit key per node**: set the `identity` field in the config for each node
+that needs a specific key:
 
 ```toml
 [sessions.work]
+name = "work"
+
+[[sessions.work.nodes]]
 host     = "myserver.com"
 user     = "alice"
 port     = 22
 identity = "~/.ssh/id_ed25519"
 ```
 
-**First connection**: rex shows the remote host's fingerprint and asks you to
+**First connection**: rex shows each remote host's fingerprint and asks you to
 confirm before adding it to `~/.ssh/known_hosts`. Subsequent connections are
 verified silently. Rex never silently accepts an unknown or changed host key.
 
@@ -337,22 +317,64 @@ Override the config file location with `REX_CONFIG=/path/to/config.toml`.
 [active]
 session = "work"          # currently active session
 
+# Direct session — single node
 [sessions.work]
+name = "work"
+
+[[sessions.work.nodes]]
 host     = "myserver.com"
 user     = "alice"
 port     = 22             # default: 22
 identity = "~/.ssh/id_ed25519"   # optional; uses ssh-agent if omitted
 
+# Two-hop session — laptop → login node → gpu node
 [sessions.cluster]
+name = "cluster"
+
+[[sessions.cluster.nodes]]
+name = "login"            # optional human label for this node
+host = "login.cluster.com"
+user = "alice"
+
+[[sessions.cluster.nodes]]
+name = "gpu"
 host = "gpu-node-04.internal"
 user = "alice"
-jump = "alice@login.cluster.com"   # omit entirely for direct connections
 
+# Three-hop session — any number of hops supported
+[sessions.deep]
+name = "deep"
+
+[[sessions.deep.nodes]]
+name = "gateway"
+host = "gateway.example.com"
+user = "alice"
+
+[[sessions.deep.nodes]]
+name = "hop"
+host = "internal-hop.private"
+user = "bob"
+port = 2222
+
+[[sessions.deep.nodes]]
+name = "target"
+host = "final-target.internal"
+user = "carol"
+identity = "~/.ssh/id_rsa"
+
+# Simple session
 [sessions.homelab]
+name = "homelab"
+
+[[sessions.homelab.nodes]]
 host = "192.168.1.10"
 user = "root"
 port = 2222
 ```
+
+Nodes are connected in order: the first node is dialled directly, each subsequent
+node is reached by tunnelling through the previous one. The last node is the target
+where commands run.
 
 The file is written with mode `600`. Do not add passwords — they are not supported.
 
@@ -361,19 +383,18 @@ The file is written with mode `600`. Do not add passwords — they are not suppo
 ## Reference
 
 ```
-rex --set-session [name] user@host[:port]            register a direct session
-rex --set-session [name] user@jump user@host[:port]  register a jump session
-rex --sessions                                        list all sessions
-rex --use <name>                                      switch active session
-rex <command>                                         run command on active session
-rex --session <name> <command>                        run command on a named session
-rex --shell                                           open interactive shell
-rex --upload [-r] <local> <remote>                    upload file or directory
-rex --download [-r] <remote> <local>                  download file or directory
-rex --copy <session1:/path> <session2:/path>          copy file between sessions
-rex --json                                            emit machine-readable JSON result
-rex --force                                           skip overwrite confirmation
-rex --preserve                                        keep timestamps and permissions
+rex --set-session [name] user@host[:port] [user@hop2 ...]  register a session
+rex --sessions                                              list all sessions
+rex --use <name>                                            switch active session
+rex <command>                                               run command on active session
+rex --session <name> <command>                              run command on a named session
+rex --shell                                                 open interactive shell
+rex --upload [-r] <local> <remote>                         upload file or directory
+rex --download [-r] <remote> <local>                       download file or directory
+rex --copy <session1:/path> <session2:/path>               copy file between sessions
+rex --json                                                  emit machine-readable JSON result
+rex --force                                                 skip overwrite confirmation
+rex --preserve                                              keep timestamps and permissions
 ```
 
 When a remote command itself has flags (e.g. `git log --oneline`), place rex's
