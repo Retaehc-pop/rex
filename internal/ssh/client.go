@@ -266,36 +266,22 @@ func (c *Client) Run(cmd string) (int, error) {
 	}
 	defer sess.Close()
 
-	isTTY := term.IsTerminal(int(os.Stdin.Fd()))
-	if isTTY {
-		w, h, _ := term.GetSize(int(os.Stdin.Fd()))
-		modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-		if err := sess.RequestPty("xterm-256color", h, w, modes); err != nil {
-			return 1, fmt.Errorf("request pty: %w", err)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		restore, err := setupPTY(sess)
+		if err != nil {
+			return 1, err
 		}
-		oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-		if err == nil {
-			defer term.Restore(int(os.Stdin.Fd()), oldState)
-		}
-		go watchResize(sess)
+		defer restore()
 	}
 
-	sess.Stdin = os.Stdin
-	sess.Stdout = os.Stdout
-	sess.Stderr = os.Stderr
+	sess.Stdin, sess.Stdout, sess.Stderr = os.Stdin, os.Stdout, os.Stderr
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go forwardSignals(sess, sigCh)
 	defer signal.Stop(sigCh)
+	go forwardSignals(sess, sigCh)
 
-	if err := sess.Run(cmd); err != nil {
-		if exitErr, ok := err.(*ssh.ExitError); ok {
-			return exitErr.ExitStatus(), nil
-		}
-		return 1, err
-	}
-	return 0, nil
+	return exitCode(sess.Run(cmd))
 }
 
 // Shell opens an interactive shell on the remote.
@@ -306,34 +292,47 @@ func (c *Client) Shell() (int, error) {
 	}
 	defer sess.Close()
 
-	w, h, _ := term.GetSize(int(os.Stdin.Fd()))
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
-	if err := sess.RequestPty("xterm-256color", h, w, modes); err != nil {
-		return 1, fmt.Errorf("request pty: %w", err)
-	}
-
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	restore, err := setupPTY(sess)
 	if err != nil {
 		return 1, err
 	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	defer restore()
 
-	go watchResize(sess)
-
-	sess.Stdin = os.Stdin
-	sess.Stdout = os.Stdout
-	sess.Stderr = os.Stderr
+	sess.Stdin, sess.Stdout, sess.Stderr = os.Stdin, os.Stdout, os.Stderr
 
 	if err := sess.Shell(); err != nil {
 		return 1, err
 	}
-	if err := sess.Wait(); err != nil {
-		if exitErr, ok := err.(*ssh.ExitError); ok {
-			return exitErr.ExitStatus(), nil
-		}
-		return 1, err
+	return exitCode(sess.Wait())
+}
+
+// setupPTY allocates a PTY on the remote, puts the local terminal in raw mode,
+// and forwards window resize events. The returned restore function is always
+// non-nil and should be deferred by the caller.
+func setupPTY(sess *ssh.Session) (restore func(), err error) {
+	fd := int(os.Stdin.Fd())
+	w, h, _ := term.GetSize(fd)
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+	if err := sess.RequestPty("xterm-256color", h, w, modes); err != nil {
+		return func() {}, fmt.Errorf("request pty: %w", err)
 	}
-	return 0, nil
+	go watchResize(sess)
+	if oldState, err := term.MakeRaw(fd); err == nil {
+		return func() { term.Restore(fd, oldState) }, nil
+	}
+	return func() {}, nil
+}
+
+// exitCode converts a session error into a (code, error) pair, treating a
+// remote non-zero exit as a normal return rather than an error.
+func exitCode(err error) (int, error) {
+	if err == nil {
+		return 0, nil
+	}
+	if exitErr, ok := err.(*ssh.ExitError); ok {
+		return exitErr.ExitStatus(), nil
+	}
+	return 1, err
 }
 
 // SSHClient exposes the underlying target connection for SFTP use.
