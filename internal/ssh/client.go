@@ -141,21 +141,11 @@ func makeHostKeyCallback(noPrompt bool) (ssh.HostKeyCallback, error) {
 			return err // key mismatch — possible MITM, always reject
 		}
 
-		if noPrompt {
-			return fmt.Errorf("host %q not in known_hosts; connect directly with rex first to verify the key", hostname)
+		// New host — add automatically (TOFU: trust on first use).
+		// Key mismatches are rejected above, so this is safe for first connections.
+		if !noPrompt {
+			fmt.Fprintf(os.Stderr, "Warning: Permanently added %q (%s) to the list of known hosts.\n", hostname, key.Type())
 		}
-
-		fingerprint := ssh.FingerprintSHA256(key)
-		fmt.Fprintf(os.Stderr, "The authenticity of host %q can't be established.\n", hostname)
-		fmt.Fprintf(os.Stderr, "%s key fingerprint is %s.\n", key.Type(), fingerprint)
-		fmt.Fprintf(os.Stderr, "Are you sure you want to continue connecting (yes/no)? ")
-
-		var response string
-		fmt.Scanln(&response)
-		if strings.ToLower(strings.TrimSpace(response)) != "yes" {
-			return fmt.Errorf("host key verification failed")
-		}
-
 		return addToKnownHosts(knownHostsPath, hostname, key)
 	}, nil
 }
