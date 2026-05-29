@@ -171,6 +171,20 @@ func addToKnownHosts(path, hostname string, key ssh.PublicKey) error {
 	return err
 }
 
+// loadKey reads and parses a private key file, returning nil if the file does
+// not exist or cannot be parsed (e.g. encrypted with a passphrase).
+func loadKey(path string) ssh.Signer {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	s, err := ssh.ParsePrivateKey(data)
+	if err != nil {
+		return nil
+	}
+	return s
+}
+
 func authMethods(identity string, noPrompt bool) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 
@@ -186,11 +200,15 @@ func authMethods(identity string, noPrompt bool) ([]ssh.AuthMethod, error) {
 			home, _ := os.UserHomeDir()
 			identity = home + identity[1:]
 		}
-		key, err := os.ReadFile(identity)
-		if err == nil {
-			signer, err := ssh.ParsePrivateKey(key)
-			if err == nil {
-				methods = append(methods, ssh.PublicKeys(signer))
+		if s := loadKey(identity); s != nil {
+			methods = append(methods, ssh.PublicKeys(s))
+		}
+	} else {
+		// No explicit identity — try the same defaults as the ssh command.
+		home, _ := os.UserHomeDir()
+		for _, name := range []string{"id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"} {
+			if s := loadKey(filepath.Join(home, ".ssh", name)); s != nil {
+				methods = append(methods, ssh.PublicKeys(s))
 			}
 		}
 	}
