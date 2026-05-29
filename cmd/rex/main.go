@@ -239,25 +239,12 @@ func runCommand(cfg *config.Config, sessionName, cmd string, jsonOut bool) (int,
 		}
 	}
 
-	var exitCode int
-	var runErr error
-
-	if dc, daemonErr := connectOrStartDaemon(); daemonErr == nil {
-		defer dc.Close()
-		if isTTY {
-			if oldState, e := term.MakeRaw(int(os.Stdin.Fd())); e == nil {
-				defer term.Restore(int(os.Stdin.Fd()), oldState)
-			}
-		}
-		exitCode, runErr = dc.Exec(daemon.ExecRequest{
-			Session: sName,
-			Cmd:     cmd,
-			TTY:     isTTY,
-			Width:   w,
-			Height:  h,
-		})
-	} else {
-		// Daemon unavailable — connect directly.
+	// Try the daemon first; fall back to direct SSH on any error (auth
+	// failure, stale connection, daemon not available, etc.).  The daemon
+	// helper restores terminal state before returning so prompts in the
+	// direct path work correctly.
+	exitCode, runErr := execViaDaemon(sName, cmd, isTTY, w, h)
+	if runErr != nil {
 		client, err := rexssh.Connect(s)
 		if err != nil {
 			return 1, err
@@ -290,21 +277,55 @@ func runShell(cfg *config.Config, sessionName string) (int, error) {
 		w, h = ww, hh
 	}
 
-	if dc, daemonErr := connectOrStartDaemon(); daemonErr == nil {
-		defer dc.Close()
-		if oldState, e := term.MakeRaw(int(os.Stdin.Fd())); e == nil {
-			defer term.Restore(int(os.Stdin.Fd()), oldState)
-		}
-		return dc.Shell(daemon.ShellRequest{Session: sName, Width: w, Height: h})
+	if code, err := shellViaDaemon(sName, w, h); err == nil {
+		return code, nil
 	}
 
-	// Daemon unavailable — connect directly.
+	// Daemon unavailable or SSH connection failed — connect directly.
 	client, err := rexssh.Connect(s)
 	if err != nil {
 		return 1, err
 	}
 	defer client.Close()
 	return client.Shell()
+}
+
+// execViaDaemon attempts to run cmd through rexd. It manages terminal raw mode
+// so the state is fully restored before it returns, allowing the caller to fall
+// back to direct SSH (which may need to display interactive prompts).
+func execViaDaemon(sessionName, cmd string, isTTY bool, w, h int) (int, error) {
+	dc, err := connectOrStartDaemon()
+	if err != nil {
+		return 1, err
+	}
+	defer dc.Close()
+	if isTTY {
+		if oldState, e := term.MakeRaw(int(os.Stdin.Fd())); e == nil {
+			defer term.Restore(int(os.Stdin.Fd()), oldState)
+		}
+	}
+	return dc.Exec(daemon.ExecRequest{
+		Session: sessionName,
+		Cmd:     cmd,
+		TTY:     isTTY,
+		Width:   w,
+		Height:  h,
+	})
+}
+
+// shellViaDaemon attempts to open an interactive shell through rexd.
+func shellViaDaemon(sessionName string, w, h int) (int, error) {
+	dc, err := connectOrStartDaemon()
+	if err != nil {
+		return 1, err
+	}
+	defer dc.Close()
+	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return 1, err
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+	return dc.Shell(daemon.ShellRequest{Session: sessionName, Width: w, Height: h})
 }
 
 func runUpload(cfg *config.Config, sessionName string, args []string, recursive, force, preserve bool) error {
