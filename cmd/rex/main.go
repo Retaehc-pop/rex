@@ -39,12 +39,9 @@ func newRootCmd() *cobra.Command {
 	var (
 		flagSetSession bool
 		flagSessions   bool
-		flagUse        string
-		flagSession    string
-		flagUpload     bool
-		flagDownload   bool
-		flagShell      bool
-		flagCopy       bool
+		flagUpload   bool
+		flagDownload bool
+		flagCopy     bool
 		flagRecursive  bool
 		flagForce      bool
 		flagPreserve   bool
@@ -52,7 +49,7 @@ func newRootCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:          "rex",
+		Use:          "rex <machine> [command]",
 		Short:        "Remote command execution over SSH",
 		SilenceUsage: true,
 		Args:         cobra.ArbitraryArgs,
@@ -68,23 +65,29 @@ func newRootCmd() *cobra.Command {
 				return runSetSession(cfg, cfgPath, args)
 			case flagSessions:
 				return runListSessions(cfg)
-			case flagUse != "":
-				return runUse(cfg, cfgPath, flagUse)
-			case flagShell:
-				code, err := runShell(cfg, flagSession)
-				remoteExitCode = code
-				return err
-			case flagUpload:
-				return runUpload(cfg, flagSession, args, flagRecursive, flagForce, flagPreserve)
-			case flagDownload:
-				return runDownload(cfg, flagSession, args, flagRecursive, flagForce, flagPreserve)
 			case flagCopy:
 				return runCopy(cfg, args)
+			case flagUpload:
+				if len(args) < 3 {
+					return fmt.Errorf("usage: rex --upload [-r] <machine> <local> <remote>")
+				}
+				return runUpload(cfg, args[0], args[1:], flagRecursive, flagForce, flagPreserve)
+			case flagDownload:
+				if len(args) < 3 {
+					return fmt.Errorf("usage: rex --download [-r] <machine> <remote> <local>")
+				}
+				return runDownload(cfg, args[0], args[1:], flagRecursive, flagForce, flagPreserve)
 			default:
 				if len(args) == 0 {
 					return cmd.Help()
 				}
-				code, err := runCommand(cfg, flagSession, strings.Join(args, " "), flagJSON)
+				machine := args[0]
+				if len(args) == 1 {
+					code, err := runShell(cfg, machine)
+					remoteExitCode = code
+					return err
+				}
+				code, err := runCommand(cfg, machine, strings.Join(args[1:], " "), flagJSON)
 				remoteExitCode = code
 				return err
 			}
@@ -92,17 +95,13 @@ func newRootCmd() *cobra.Command {
 	}
 
 	f := cmd.Flags()
-	// SetInterspersed(false): stop flag parsing at first non-flag arg.
-	// This lets "rex --session foo git log --oneline" work correctly —
-	// "--oneline" is passed through as part of the remote command, not parsed as a rex flag.
+	// SetInterspersed(false): stop flag parsing at first non-flag arg so flags
+	// in the remote command (e.g. "rex work git log --oneline") are not parsed by rex.
 	f.SetInterspersed(false)
 	f.BoolVar(&flagSetSession, "set-session", false, "register a session: [name] user@host[:port]")
 	f.BoolVar(&flagSessions, "sessions", false, "list saved sessions")
-	f.StringVar(&flagUse, "use", "", "switch active session by name")
-	f.StringVar(&flagSession, "session", "", "use a named session for this command")
-	f.BoolVar(&flagUpload, "upload", false, "upload file/dir to remote")
-	f.BoolVar(&flagDownload, "download", false, "download file/dir from remote")
-	f.BoolVar(&flagShell, "shell", false, "open interactive shell on remote")
+	f.BoolVar(&flagUpload, "upload", false, "upload file/dir to remote: <machine> <local> <remote>")
+	f.BoolVar(&flagDownload, "download", false, "download file/dir from remote: <machine> <remote> <local>")
 	f.BoolVar(&flagCopy, "copy", false, "copy between sessions: session1:/path session2:/path")
 	f.BoolVarP(&flagRecursive, "recursive", "r", false, "recursive file transfer")
 	f.BoolVar(&flagForce, "force", false, "skip overwrite confirmation")
@@ -204,24 +203,9 @@ func runListSessions(cfg *config.Config) error {
 	return nil
 }
 
-func runUse(cfg *config.Config, cfgPath, name string) error {
-	if err := session.Use(cfg, name); err != nil {
-		return err
-	}
-	if err := session.Save(cfgPath, cfg); err != nil {
-		return err
-	}
-	fmt.Printf("Switched to session %q\n", name)
-	return nil
-}
-
 func resolveSession(cfg *config.Config, name string) (config.SessionConfig, string, error) {
-	if name != "" {
-		s, err := session.Get(cfg, name)
-		return s, name, err
-	}
-	s, err := session.Active(cfg)
-	return s, cfg.Active.Session, err
+	s, err := session.Get(cfg, name)
+	return s, name, err
 }
 
 func runCommand(cfg *config.Config, sessionName, cmd string, jsonOut bool) (int, error) {
@@ -330,7 +314,7 @@ func shellViaDaemon(sessionName string, w, h int) (int, error) {
 
 func runUpload(cfg *config.Config, sessionName string, args []string, recursive, force, preserve bool) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: rex --upload [-r] <local> <remote>")
+		return fmt.Errorf("usage: rex --upload [-r] <machine> <local> <remote>")
 	}
 	s, _, err := resolveSession(cfg, sessionName)
 	if err != nil {
@@ -346,7 +330,7 @@ func runUpload(cfg *config.Config, sessionName string, args []string, recursive,
 
 func runDownload(cfg *config.Config, sessionName string, args []string, recursive, force, preserve bool) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: rex --download [-r] <remote> <local>")
+		return fmt.Errorf("usage: rex --download [-r] <machine> <remote> <local>")
 	}
 	s, _, err := resolveSession(cfg, sessionName)
 	if err != nil {
