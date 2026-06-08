@@ -48,8 +48,28 @@ func newRootCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:          "rex [-T <machine>] <machine> [command]",
-		Short:        "Remote command execution over SSH",
+		Use:   "rex <machine> [command] [flags]",
+		Short: "Remote command execution over SSH",
+		Long: `rex — run commands and transfer files on remote servers over SSH.
+
+Usage modes:
+  rex <machine> [command]            run a command (no command = interactive shell)
+  rex --set-session [name] user@host register a session
+  rex --sessions                     list saved sessions
+  rex --upload [-r] <machine> <local> <remote>   upload file or directory
+  rex --download [-r] <machine> <remote> <local> download file or directory
+  rex --copy <session1:/path> <session2:/path>   copy between two sessions
+
+The target machine can also be given with -T so remote flags are not consumed:
+  rex -T <machine> [command] [flags]`,
+		Example: `  rex --set-session work alice@myserver.com
+  rex work ls -la
+  rex work git log --oneline
+  rex -T work --json uptime
+  rex --upload work ./app /opt/app
+  rex --upload -r work ./dist /var/www
+  rex --download work /var/log/syslog ./
+  rex --copy work:/data backup:/data`,
 		SilenceUsage: true,
 		Args:         cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -101,12 +121,12 @@ func newRootCmd() *cobra.Command {
 	f.SetInterspersed(false)
 	f.BoolVar(&flagSetSession, "set-session", false, "register a session: [name] user@host[:port]")
 	f.BoolVar(&flagSessions, "sessions", false, "list saved sessions")
-	f.BoolVar(&flagUpload, "upload", false, "upload file/dir to remote: <machine> <local> <remote>")
-	f.BoolVar(&flagDownload, "download", false, "download file/dir from remote: <machine> <remote> <local>")
-	f.BoolVar(&flagCopy, "copy", false, "copy between sessions: session1:/path session2:/path")
-	f.BoolVarP(&flagRecursive, "recursive", "r", false, "recursive file transfer")
-	f.BoolVar(&flagJSON, "json", false, "output machine-readable JSON result")
-	f.StringVarP(&flagTarget, "target", "T", "", "target session name")
+	f.BoolVar(&flagUpload, "upload", false, "upload file or directory: <machine> <local> <remote>")
+	f.BoolVar(&flagDownload, "download", false, "download file or directory: <machine> <remote> <local>")
+	f.BoolVar(&flagCopy, "copy", false, "copy between sessions: <session1:/path> <session2:/path>")
+	f.BoolVarP(&flagRecursive, "recursive", "r", false, "recursive transfer (for --upload / --download)")
+	f.BoolVar(&flagJSON, "json", false, "print result as JSON (exit code, duration, session)")
+	f.StringVarP(&flagTarget, "target", "T", "", "target machine (alternative to first positional arg)")
 
 	return cmd
 }
