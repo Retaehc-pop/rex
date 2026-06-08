@@ -39,17 +39,16 @@ func newRootCmd() *cobra.Command {
 	var (
 		flagSetSession bool
 		flagSessions   bool
-		flagUpload   bool
-		flagDownload bool
-		flagCopy     bool
+		flagUpload     bool
+		flagDownload   bool
+		flagCopy       bool
 		flagRecursive  bool
-		flagForce      bool
-		flagPreserve   bool
 		flagJSON       bool
+		flagTarget     string
 	)
 
 	cmd := &cobra.Command{
-		Use:          "rex <machine> [command]",
+		Use:          "rex [-T <machine>] <machine> [command]",
 		Short:        "Remote command execution over SSH",
 		SilenceUsage: true,
 		Args:         cobra.ArbitraryArgs,
@@ -68,26 +67,28 @@ func newRootCmd() *cobra.Command {
 			case flagCopy:
 				return runCopy(cfg, args)
 			case flagUpload:
-				if len(args) < 3 {
-					return fmt.Errorf("usage: rex --upload [-r] <machine> <local> <remote>")
+				machine, rest, err := splitMachineArgs(flagTarget, args)
+				if err != nil || len(rest) != 2 {
+					return fmt.Errorf("usage: rex --upload [-r] [-T <machine>] <local> <remote>")
 				}
-				return runUpload(cfg, args[0], args[1:], flagRecursive, flagForce, flagPreserve)
+				return runUpload(cfg, machine, rest, flagRecursive)
 			case flagDownload:
-				if len(args) < 3 {
-					return fmt.Errorf("usage: rex --download [-r] <machine> <remote> <local>")
+				machine, rest, err := splitMachineArgs(flagTarget, args)
+				if err != nil || len(rest) != 2 {
+					return fmt.Errorf("usage: rex --download [-r] [-T <machine>] <remote> <local>")
 				}
-				return runDownload(cfg, args[0], args[1:], flagRecursive, flagForce, flagPreserve)
+				return runDownload(cfg, machine, rest, flagRecursive)
 			default:
-				if len(args) == 0 {
+				machine, rest, err := splitMachineArgs(flagTarget, args)
+				if err != nil {
 					return cmd.Help()
 				}
-				machine := args[0]
-				if len(args) == 1 {
+				if len(rest) == 0 {
 					code, err := runShell(cfg, machine)
 					remoteExitCode = code
 					return err
 				}
-				code, err := runCommand(cfg, machine, strings.Join(args[1:], " "), flagJSON)
+				code, err := runCommand(cfg, machine, strings.Join(rest, " "), flagJSON)
 				remoteExitCode = code
 				return err
 			}
@@ -104,9 +105,8 @@ func newRootCmd() *cobra.Command {
 	f.BoolVar(&flagDownload, "download", false, "download file/dir from remote: <machine> <remote> <local>")
 	f.BoolVar(&flagCopy, "copy", false, "copy between sessions: session1:/path session2:/path")
 	f.BoolVarP(&flagRecursive, "recursive", "r", false, "recursive file transfer")
-	f.BoolVar(&flagForce, "force", false, "skip overwrite confirmation")
-	f.BoolVar(&flagPreserve, "preserve", false, "preserve timestamps and permissions")
 	f.BoolVar(&flagJSON, "json", false, "output machine-readable JSON result")
+	f.StringVarP(&flagTarget, "target", "T", "", "target session name")
 
 	return cmd
 }
@@ -151,6 +151,18 @@ func startDaemon() error {
 		}
 	}
 	return fmt.Errorf("rexd did not become ready in time")
+}
+
+// splitMachineArgs resolves the target machine from either the -T/--target flag
+// or the first positional argument, returning the machine name and remaining args.
+func splitMachineArgs(target string, args []string) (machine string, rest []string, err error) {
+	if target != "" {
+		return target, args, nil
+	}
+	if len(args) == 0 {
+		return "", nil, fmt.Errorf("no machine specified: use <machine> as first arg or -T <machine>")
+	}
+	return args[0], args[1:], nil
 }
 
 func runSetSession(cfg *config.Config, cfgPath string, args []string) error {
@@ -312,7 +324,7 @@ func shellViaDaemon(sessionName string, w, h int) (int, error) {
 	return dc.Shell(daemon.ShellRequest{Session: sessionName, Width: w, Height: h})
 }
 
-func runUpload(cfg *config.Config, sessionName string, args []string, recursive, force, preserve bool) error {
+func runUpload(cfg *config.Config, sessionName string, args []string, recursive bool) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: rex --upload [-r] <machine> <local> <remote>")
 	}
@@ -325,10 +337,10 @@ func runUpload(cfg *config.Config, sessionName string, args []string, recursive,
 		return err
 	}
 	defer client.Close()
-	return rexsftp.Upload(client.SSHClient(), args[0], args[1], recursive, preserve)
+	return rexsftp.Upload(client.SSHClient(), args[0], args[1], recursive)
 }
 
-func runDownload(cfg *config.Config, sessionName string, args []string, recursive, force, preserve bool) error {
+func runDownload(cfg *config.Config, sessionName string, args []string, recursive bool) error {
 	if len(args) != 2 {
 		return fmt.Errorf("usage: rex --download [-r] <machine> <remote> <local>")
 	}
@@ -341,7 +353,7 @@ func runDownload(cfg *config.Config, sessionName string, args []string, recursiv
 		return err
 	}
 	defer client.Close()
-	return rexsftp.Download(client.SSHClient(), args[0], args[1], recursive, preserve)
+	return rexsftp.Download(client.SSHClient(), args[0], args[1], recursive)
 }
 
 func runCopy(cfg *config.Config, args []string) error {
@@ -381,7 +393,7 @@ func runCopy(cfg *config.Config, args []string) error {
 	}
 	defer srcClient.Close()
 
-	if err := rexsftp.Download(srcClient.SSHClient(), srcPath, tmpPath, false, false); err != nil {
+	if err := rexsftp.Download(srcClient.SSHClient(), srcPath, tmpPath, false); err != nil {
 		return fmt.Errorf("download from source: %w", err)
 	}
 
@@ -391,7 +403,7 @@ func runCopy(cfg *config.Config, args []string) error {
 	}
 	defer dstClient.Close()
 
-	return rexsftp.Upload(dstClient.SSHClient(), tmpPath, dstPath, false, false)
+	return rexsftp.Upload(dstClient.SSHClient(), tmpPath, dstPath, false)
 }
 
 func parseSessionPath(s string) (sess, path string, err error) {

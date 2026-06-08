@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func Upload(sshClient *ssh.Client, local, remote string, recursive, preserve bool) error {
+func Upload(sshClient *ssh.Client, local, remote string, recursive bool) error {
 	client, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return fmt.Errorf("sftp: %w", err)
@@ -27,12 +27,12 @@ func Upload(sshClient *ssh.Client, local, remote string, recursive, preserve boo
 		if !recursive {
 			return fmt.Errorf("%s is a directory; use -r for recursive upload", local)
 		}
-		return uploadDir(client, local, remote, preserve)
+		return uploadDir(client, local, remote)
 	}
-	return uploadFile(client, local, remote, info.Size(), preserve)
+	return uploadFile(client, local, remote, info.Size())
 }
 
-func uploadFile(client *sftp.Client, local, remote string, size int64, preserve bool) error {
+func uploadFile(client *sftp.Client, local, remote string, size int64) error {
 	src, err := os.Open(local)
 	if err != nil {
 		return err
@@ -50,7 +50,7 @@ func uploadFile(client *sftp.Client, local, remote string, size int64, preserve 
 	return err
 }
 
-func uploadDir(client *sftp.Client, local, remote string, preserve bool) error {
+func uploadDir(client *sftp.Client, local, remote string) error {
 	return filepath.Walk(local, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -61,11 +61,11 @@ func uploadDir(client *sftp.Client, local, remote string, preserve bool) error {
 		if info.IsDir() {
 			return client.MkdirAll(dst)
 		}
-		return uploadFile(client, path, dst, info.Size(), preserve)
+		return uploadFile(client, path, dst, info.Size())
 	})
 }
 
-func Download(sshClient *ssh.Client, remote, local string, recursive, preserve bool) error {
+func Download(sshClient *ssh.Client, remote, local string, recursive bool) error {
 	client, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return fmt.Errorf("sftp: %w", err)
@@ -80,12 +80,12 @@ func Download(sshClient *ssh.Client, remote, local string, recursive, preserve b
 		if !recursive {
 			return fmt.Errorf("%s is a directory; use -r for recursive download", remote)
 		}
-		return downloadDir(client, remote, local, preserve)
+		return downloadDir(client, remote, local)
 	}
-	return downloadFile(client, remote, local, info.Size(), preserve)
+	return downloadFile(client, remote, local, info.Size())
 }
 
-func downloadFile(client *sftp.Client, remote, local string, size int64, preserve bool) error {
+func downloadFile(client *sftp.Client, remote, local string, size int64) error {
 	src, err := client.Open(remote)
 	if err != nil {
 		return fmt.Errorf("open remote %s: %w", remote, err)
@@ -107,7 +107,7 @@ func downloadFile(client *sftp.Client, remote, local string, size int64, preserv
 	return err
 }
 
-func downloadDir(client *sftp.Client, remote, local string, preserve bool) error {
+func downloadDir(client *sftp.Client, remote, local string) error {
 	walker := client.Walk(remote)
 	for walker.Step() {
 		if err := walker.Err(); err != nil {
@@ -122,7 +122,7 @@ func downloadDir(client *sftp.Client, remote, local string, preserve bool) error
 			}
 			continue
 		}
-		if err := downloadFile(client, walker.Path(), dst, walker.Stat().Size(), preserve); err != nil {
+		if err := downloadFile(client, walker.Path(), dst, walker.Stat().Size()); err != nil {
 			return err
 		}
 	}

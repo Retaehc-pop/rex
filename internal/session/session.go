@@ -88,26 +88,6 @@ func Set(cfg *config.Config, name string, targets []string) error {
 	return nil
 }
 
-func Use(cfg *config.Config, name string) error {
-	if _, ok := cfg.Sessions[name]; !ok {
-		return fmt.Errorf("session %q not found", name)
-	}
-	cfg.Active.Session = name
-	return nil
-}
-
-func Active(cfg *config.Config) (config.SessionConfig, error) {
-	name := cfg.Active.Session
-	if name == "" {
-		return config.SessionConfig{}, fmt.Errorf("no active session. Run: rex --set-session user@host")
-	}
-	s, ok := cfg.Sessions[name]
-	if !ok {
-		return config.SessionConfig{}, fmt.Errorf("active session %q not found in config", name)
-	}
-	return s, nil
-}
-
 func Get(cfg *config.Config, name string) (config.SessionConfig, error) {
 	s, ok := cfg.Sessions[name]
 	if !ok {
